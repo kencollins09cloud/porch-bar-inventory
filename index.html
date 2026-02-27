@@ -18,10 +18,6 @@
         .font-sans { font-family: 'Inter', sans-serif; }
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-        
-        /* Animation for smooth expansion */
-        .expand-enter { opacity: 0; transform: translateY(-10px); }
-        .expand-enter-active { opacity: 1; transform: translateY(0); transition: all 300ms ease-out; }
     </style>
 </head>
 <body class="bg-[#fdfcfb] font-sans text-stone-900">
@@ -44,14 +40,19 @@
             const [activeSubCategory, setActiveSubCategory] = useState('All');
             const [expandedItems, setExpandedItems] = useState({});
 
-            const getProgramBucket = (category) => {
-                if (!category) return "Spirits";
-                const cat = category.toLowerCase();
+            const getProgramBucket = (row) => {
+                const cat = (row['Category'] || "").toLowerCase();
+                const sub = (row['Sub Category'] || "").toLowerCase();
+
+                // Check for Allocated or Captain's List first as they take priority
+                if (cat.includes('allocated') || sub.includes('allocated')) return 'Allocated';
+                if (cat.includes('captain') || sub.includes('captain')) return "Captain's List";
+                
+                // General Buckets
                 if (cat.includes('wine by the bottle') || cat.includes('wine by the glass')) return 'Wine';
                 if (cat.includes('beer')) return 'Beer';
-                if (cat.includes('ports') || cat.includes('dessert') || cat.includes('after dinner') || cat.includes('digestif')) return 'After Dinner';
-                if (cat.includes('captain')) return "Captain's List";
-                if (cat.includes('allocated')) return "Allocated";
+                if (cat.includes('ports') || cat.includes('dessert') || cat.includes('after dinner') || cat.includes('digestif') || cat.includes('cordial') || cat.includes('cognac')) return 'After Dinner';
+                
                 return 'Spirits';
             };
 
@@ -59,43 +60,49 @@
                 try {
                     setIsLoading(true);
                     const response = await fetch(SHEET_URL);
-                    if (!response.ok) throw new Error('Could not connect to Google Sheet.');
+                    if (!response.ok) throw new Error('Could not connect to Google Sheet. Ensure it is "Published to Web" as a CSV.');
                     const csvText = await response.text();
                     
-                    const lines = csvText.split(/\r?\n/);
-                    if (lines.length < 2) throw new Error('Inventory sheet is empty.');
+                    // Split lines and filter out empty ones
+                    const lines = csvText.split(/\r?\n/).filter(line => line.trim() !== "");
+                    if (lines.length < 2) throw new Error('Inventory sheet appears empty.');
                     
-                    // Simple parser handling quotes/commas
+                    // Find headers (headers might not be the very first line if there are blank rows)
                     const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
+                    
                     const newInventory = { Wine: [], Spirits: [], Beer: [], "After Dinner": [], "Captain's List": [], Allocated: [] };
+                    let totalCount = 0;
 
                     for (let i = 1; i < lines.length; i++) {
-                        if (!lines[i] || lines[i].trim() === '') continue;
-                        
-                        // Robust regex for CSV values (handling commas inside quotes)
+                        // Split by comma but ignore commas inside quotes
                         const values = lines[i].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(v => v.trim().replace(/^"|"$/g, ''));
                         const row = {};
-                        headers.forEach((header, idx) => { row[header] = values[idx]; });
+                        headers.forEach((header, idx) => {
+                            if (header) row[header] = values[idx];
+                        });
 
-                        // Skip rows with no product name
-                        if (!row['Product Name']) continue;
+                        // Ensure we have at least a product name to display
+                        if (!row['Product Name'] || row['Product Name'] === '0') continue;
 
-                        const bucket = getProgramBucket(row['Category']);
-                        if (!newInventory[bucket]) newInventory[bucket] = [];
-                        
+                        const bucket = getProgramBucket(row);
                         newInventory[bucket].push({
                             id: `item-${i}`,
                             name: row['Product Name'],
-                            category: row['Category'],
+                            category: row['Category'] || "Uncategorized",
                             subCategory: row['Sub Category'] || "General",
                             origin: row['Origin'] || "N/A",
-                            tastingNotes: row['Tasting Notes'] || "No tasting notes on file.",
+                            tastingNotes: row['Tasting Notes'] || "No notes on file.",
                             tableNotes: row['Notes'] || row['Detailed Note'] || "No narrative provided.",
                             status: row['Status'] || "In stock",
                             price: row['Menu Price'] || row['Price Per 1oz Pour'] || "N/A",
-                            substitute: row['Approved Backup'] || "Consult Bar Lead",
+                            substitute: row['Approved Backup'] || "Inquire with Bar Lead",
                             subReason: row['Sub Reason'] || "Comparable profile."
                         });
+                        totalCount++;
+                    }
+
+                    if (totalCount === 0) {
+                        throw new Error("Connected to sheet but found 0 products. Please verify your column headers match 'Product Name' and 'Category'.");
                     }
 
                     setInventoryData(newInventory);
@@ -115,12 +122,10 @@
             const filteredData = useMemo(() => {
                 return currentProgramData.filter(item => {
                     const searchStr = searchTerm.toLowerCase();
-                    const matchesSearch = item.name.toLowerCase().includes(searchStr) || 
-                                        item.subCategory.toLowerCase().includes(searchStr) ||
-                                        item.origin.toLowerCase().includes(searchStr);
-                    const matchesCategory = activeSubCategory === 'All' || item.subCategory === activeSubCategory;
-                    return matchesSearch && matchesCategory;
-                });
+                    return item.name.toLowerCase().includes(searchStr) || 
+                           item.subCategory.toLowerCase().includes(searchStr) ||
+                           item.origin.toLowerCase().includes(searchStr);
+                }).filter(item => activeSubCategory === 'All' || item.subCategory === activeSubCategory);
             }, [searchTerm, activeSubCategory, activeProgram, inventoryData]);
 
             const toggleExpand = (id) => { setExpandedItems(prev => ({ ...prev, [id]: !prev[id] })); };
@@ -177,8 +182,9 @@
                     {error ? (
                         <div className="bg-red-50 border border-red-100 p-8 rounded-3xl text-center">
                             <Icon name="AlertCircle" className="text-red-400 mx-auto mb-4" size={48} />
-                            <p className="text-red-800 font-medium">{error}</p>
-                            <button onClick={fetchData} className="mt-4 px-6 py-2 bg-red-600 text-white rounded-xl text-xs font-bold uppercase">Retry Connection</button>
+                            <h3 className="text-lg font-bold text-red-900 mb-2">Connection Error</h3>
+                            <p className="text-red-800 font-medium mb-6">{error}</p>
+                            <button onClick={fetchData} className="px-8 py-3 bg-red-600 text-white rounded-xl text-xs font-black uppercase tracking-widest shadow-lg shadow-red-200">Retry Connection</button>
                         </div>
                     ) : (
                         <>
@@ -187,7 +193,7 @@
                                     <Icon name="Search" className="absolute left-5 top-1/2 -translate-y-1/2 text-stone-300" size={20} />
                                     <input 
                                         type="text" 
-                                        placeholder={`Search ${activeProgram.toLowerCase()} program...`}
+                                        placeholder={`Search ${activeProgram.toLowerCase()}...`}
                                         className="w-full pl-14 pr-4 py-4 bg-stone-50 rounded-2xl focus:outline-none focus:ring-2 focus:ring-stone-100 transition-all border-transparent border text-stone-800 font-medium"
                                         value={searchTerm}
                                         onChange={(e) => setSearchTerm(e.target.value)}
@@ -213,7 +219,7 @@
                                 {filteredData.length > 0 ? (
                                     filteredData.map(item => (
                                         <div key={item.id} className={`group bg-white rounded-3xl border transition-all duration-300 overflow-hidden ${expandedItems[item.id] ? 'border-stone-300 shadow-xl' : 'border-stone-100 hover:border-stone-200 shadow-sm'}`}>
-                                            <div className="p-5 flex items-center justify-between cursor-pointer" onClick={() => toggleExpand(item.id)}>
+                                            <div className="p-5 flex items-center justify-between cursor-pointer select-none" onClick={() => toggleExpand(item.id)}>
                                                 <div className="flex items-center gap-5">
                                                     <div className={`p-4 rounded-2xl ${item.status?.toLowerCase().includes('86d') ? 'bg-red-50 text-red-400' : 'bg-stone-50 text-stone-400'}`}>
                                                         <Icon name={item.status?.toLowerCase().includes('86d') ? "Repeat" : "Wine"} size={22} />
@@ -229,19 +235,19 @@
                                                         </div>
                                                     </div>
                                                 </div>
-                                                <div className="text-stone-200">
+                                                <div className="text-stone-200 pr-2 group-hover:text-stone-400 transition-colors">
                                                     <Icon name={expandedItems[item.id] ? "ChevronDown" : "ChevronRight"} size={24} />
                                                 </div>
                                             </div>
 
                                             {expandedItems[item.id] && (
-                                                <div className="px-6 pb-8 pt-2 bg-stone-50/30 border-t border-stone-50">
+                                                <div className="px-6 pb-8 pt-2 bg-stone-50/30 border-t border-stone-50 animate-in fade-in slide-in-from-top-1 duration-300">
                                                     {item.status?.toLowerCase().includes('86d') && (
                                                         <div className="mt-4 p-4 bg-red-50 border border-red-100 rounded-2xl flex items-center gap-4">
-                                                            <Icon name="Repeat" className="text-red-500" size={20} />
+                                                            <Icon name="Repeat" className="text-red-500 animate-pulse" size={20} />
                                                             <div>
-                                                                <p className="text-[10px] font-black text-red-600 uppercase">Substitution Required</p>
-                                                                <p className="text-sm text-red-800">Pivot to: <span className="font-bold underline uppercase">{item.substitute}</span></p>
+                                                                <p className="text-[10px] font-black text-red-600 uppercase tracking-widest">Substitution Required</p>
+                                                                <p className="text-sm text-red-800 font-medium">Pivot to: <span className="font-bold underline uppercase">{item.substitute}</span></p>
                                                             </div>
                                                         </div>
                                                     )}
@@ -278,7 +284,7 @@
                                 ) : (
                                     <div className="text-center py-24 bg-white rounded-3xl border-2 border-dashed border-stone-100">
                                         <Icon name="Star" className="mx-auto text-stone-50 mb-6" size={64} />
-                                        <p className="text-stone-300 font-serif italic text-xl">No matches found.</p>
+                                        <p className="text-stone-300 font-serif italic text-xl">No items found for this selection.</p>
                                     </div>
                                 )}
                             </div>
